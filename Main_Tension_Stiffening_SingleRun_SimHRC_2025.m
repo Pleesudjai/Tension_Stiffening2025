@@ -52,15 +52,188 @@
 
 %% Program initialization
 close all; clear all; clc;
+% Display program information
+fprintf('======================================================\n');
+fprintf('Finite Difference Tension Stiffening Model\n');
+fprintf('Author: Chidchanok Pleesudjai\n');
+fprintf('Version: %s\n', 'Main_Tension_Stiffening_SingleRun_SimRC_SimHRC_2025');
+fprintf('Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+fprintf('======================================================\n\n');
 
 % ------------------------------------
 % Part A: Input data
 % ------------------------------------
-progVersion  = 'Main_Tension_Stiffening_SingleRun_SimRC_SimHRC_2025';   % program version
-fname        = 'C25_00_model_scr6.dat';                             % file name to report the output
-fname_ckResp = 'C25_00_model_scr6_ckResp.dat';                      % file name to report the responses at each crack formation
+progVersion = 'Main_Tension_Stiffening_SingleRun_SimRC_SimHRC_2025'; % program version
+fname = 'C25_00_model_scr6.dat'; % file name to report the output
+fname_ckResp = 'C25_00_model_scr6_ckResp.dat'; % file name to report the responses at each crack formation
+
+% Display analysis setup
+fprintf('Analysis Setup:\n');
+fprintf('- Program Version: %s\n', progVersion);
+fprintf('- Output File: %s\n', fname);
+fprintf('- Crack Response File: %s\n', fname_ckResp);
+fprintf('\nInitializing tension stiffening analysis...\n\n');
+
+%% Material Model Selection
+% Select material model type: 'RC', 'FRC', 'HRC', 'PAVEMENT'
+modelType = 'HRC';
+
+% Get bond, spring, and crack models based on model type
+[bondModel, springModel, crackModel] = getMaterialModels_TensionStiff(modelType);
+
+% Extract bond-slip model properties
+xITF = bondModel.slip;
+yITF = bondModel.stress;
+yITF_fail = bondModel.failStress;
+
+% Extract spring model properties
+xSPR = springModel.slip;
+ySPR = springModel.force;
+ySPR_fail = springModel.failForce;
+
+% Extract crack-width model properties (for future implementation)
+xCRK = crackModel.width;
+yCRK = crackModel.stress;
+crackActive = crackModel.active;
+
+%% Rebar/Fiber Stress-Strain Model
+% Define rebar and fiber properties based on model type
+switch upper(modelType)
+    case 'RC'  % Standard Reinforced Concrete
+        avgST = 25;                                    % MPa - Concrete compressive strength
+        Ac = 150 * 200;                            % mm² - Cross-sectional area
+        Em = 4735 * sqrt(avgST);                          % MPa units
+
+        Es = 200000;                                       % MPa - Steel modulus
+        ns = 4;                                           % Number of rebars
+        ds = 16;                                          % mm - Rebar diameter
+        As = ns * pi * ds^2 / 4;                         % Rebar area
+        psi = ns * pi * ds;                              % Perimeter of rebars
+        xFIB = [0, 0.002, 0.025, 0.05];                 % Strain
+        yFIB = [0, 400, 550, 550];                       % MPa - Stress
+        maxSfu = 600;                                     % MPa - Maximum stress
+        effEf = 1.0;                                      % Efficiency factor
+        
+    case 'FRC'  % Fiber Reinforced Concrete
+        avgST = 35;                                    % MPa - Enhanced concrete strength with fibers
+        Ac = 100 * 100;                             % mm² - Cross-sectional area
+        Em = 4735 * sqrt(avgST);                          % MPa units
+
+        Es = 210000;                                      % MPa - Steel fiber modulus
+        ns = 100;                                         % Equivalent number of fibers
+        ds = 0.55;                                        % mm - Fiber diameter
+        As = ns * pi * ds^2 / 4;                         % Fiber area
+        psi = ns * pi * ds;                              % Perimeter of fibers
+        xFIB = [0, 0.001, 0.01, 0.05, 0.1];            % Strain
+        yFIB = [0, 210, 400, 450, 450];                 % MPa - Stress
+        maxSfu = 500;                                     % MPa - Maximum stress
+        effEf = 0.8;                                      % Efficiency factor
+        
+    case 'HRC'  % Hybrid Reinforced Concrete (Original parameters)
+        avgST = 4000;                                  % psi - Concrete compressive strength
+        Ac = 10 * 6;                                % in² - Cross-sectional area
+        Em = 57000 * sqrt(avgST);                         % psi units 
+
+        Es = 29000000;                                    % psi - Steel modulus
+        ns = 5 * 1.05;                                   % Number of rebars
+        ds = 0.75;                                        % inches - Rebar diameter
+        As = ns * pi * ds^2 / 4;                         % Rebar area
+        psi = ns * pi * ds;                              % Perimeter of rebars
+        xFIB = [0, 0.0003, 420/Es+0.0003, 0.0035+0.0003, 0.02+0.0003];  % Strain
+        yFIB = [0, 50*145, 420*145, 540*145, 540*145];   % psi - Stress
+        maxSfu = 1500 * 145;                             % psi - Maximum stress
+        effEf = 0.9;                                      % Efficiency factor
+        
+    case 'PAVEMENT'  % Pavement Reinforcement
+        avgST = 30;                                          % MPa - Pavement concrete strength
+        Ac = 1000 * 200;                                  % mm² - Cross-sectional area (per meter width)
+        Em = 4735 * sqrt(avgST);                          % MPa units
+
+        Es = 200000;                                      % MPa - Steel modulus
+        ns = 6;                                           % Rebars per meter width
+        ds = 12;                                          % mm - Rebar diameter
+        As = ns * pi * ds^2 / 4;                         % Rebar area
+        psi = ns * pi * ds;                               % Perimeter of rebars
+        xFIB = [0, 0.0015, 0.02, 0.06];                   % Strain
+        yFIB = [0, 300, 450, 450];                       % MPa - Stress
+        maxSfu = 500;                                     % MPa - Maximum stress
+        effEf = 0.95;                                     % Efficiency factor
+        
+    otherwise
+        error('Unknown model type. Use RC, FRC, HRC, or PAVEMENT');
+end
+
+% Calculate derived composite properties
+Am = Ac - As;                                      % Matrix area
+rho = As / Ac;                                     % Reinforcement ratio
+
+
+% Display material properties
+fprintf('Material Model Type: %s\n', modelType);
+fprintf('Concrete: fc = %.1f, Em = %.0f\n', fc, Em);
+fprintf('Steel: Es = %.0f, ns = %.2f, ds = %.2f\n', Es, ns, ds);
+fprintf('Reinforcement ratio: rho = %.4f\n', rho);
+fprintf('Composite area: Ac = %.2f, Matrix area: Am = %.2f\n', Ac, Am);
+fprintf('Max fiber stress: %.0f, Efficiency: %.2f\n', maxSfu, effEf);
+fprintf('Bond model active: %s, Spring model active: %s, Crack model active: %s\n\n', ...
+        string(bondModel.active), string(springModel.active), string(crackModel.active));
+
+
+%% Geometric Parameters
+% Define specimen geometry
+L = 1000;           % Total length (mm)
+width = 150;        % Width (mm)
+height = 200;       % Height (mm)
+cover = 30;         % Concrete cover (mm)
+
+% Display geometric parameters
+fprintf('Geometric Parameters:\n');
+fprintf('Length: %.0f mm, Width: %.0f mm, Height: %.0f mm\n', L, width, height);
+fprintf('Cover: %.0f mm\n\n', cover);
+
+%% Analysis Parameters
+
+totLoad   = 182000*0.22;                        % total applied tensile load  (can we get this value from the shrinkage calculation)
+stateNo   = 7;                                  % state number to generate random number; need for ckPat=3,4,5
+stdST     = 0.00;                               % standard deviation of matrix strength
+hasFiber  = 1;
+
+% specimen geometry
+endL    = 0;                                    % embedment length at the end grips
+measL   = 12*12*10;                             % embedment length for measurement in the middle
+L       = endL + measL + endL;                  % total embedment length  (pavement slab)
  
-avgST     = 4000;                               % average matrix strength
+% load and discretization
+nNode   = 5001;                                 % number of nodes to approximate total embedment length, L
+nInc    = 301;                                  % number of load increments  (should be the ration of the maximum load)
+nRecPt  = 10;                                   % number of nodes used in recording distribution value at each increment, nRecPt <= nNode
+
+% Display analysis parameters
+fprintf('Analysis Parameters:\n');
+fprintf('Elements: %d, Element size: %.2f mm\n', n_elements, dx);
+fprintf('Max load: %.0f N, Load steps: %d\n', P_max, n_steps);
+fprintf('Load increment: %.2f N\n\n', dP);
+
+%% Initialize output files
+% Open output files for writing
+fid_main = fopen(fname, 'w');
+fid_crack = fopen(fname_ckResp, 'w');
+
+% Write headers to output files
+fprintf(fid_main, '%% Tension Stiffening Analysis Results\n');
+fprintf(fid_main, '%% Program: %s\n', progVersion);
+fprintf(fid_main, '%% Author: Chidchanok Pleesudjai\n');
+fprintf(fid_main, '%% Date: %s\n', datestr(now));
+fprintf(fid_main, '%% Load_Step\tApplied_Load(N)\tDisplacement(mm)\tCrack_Count\n');
+
+fprintf(fid_crack, '%% Crack Formation Response Data\n');
+fprintf(fid_crack, '%% Program: %s\n', progVersion);
+fprintf(fid_crack, '%% Author: Chidchanok Pleesudjai\n');
+fprintf(fid_crack, '%% Date: %s\n', datestr(now));
+fprintf(fid_crack, '%% Step\tPosition(mm)\tCrack_Width(mm)\tLocal_Stress(MPa)\n');
+
+
+
 totLoad   = 182000*0.22;                        % total applied tensile load  (can we get this value from the shrinkage calculation)
 stateNo   = 7;                                  % state number to generate random number; need for ckPat=3,4,5
 stdST     = 0.00;                               % standard deviation of matrix strength
